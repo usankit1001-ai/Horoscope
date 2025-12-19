@@ -30,6 +30,11 @@ const App: React.FC = () => {
     strategy: MatchStrategy.CONTAINS
   });
 
+  // Custom headers support (key/value entries editable in the UI)
+  const [customHeaders, setCustomHeaders] = useState<{key: string, value: string}[]>([]);
+  const [newHeaderKey, setNewHeaderKey] = useState('');
+  const [newHeaderValue, setNewHeaderValue] = useState('');
+
   // Persist settings and results
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -40,13 +45,14 @@ const App: React.FC = () => {
         if (parsed.curlString) setCurlString(parsed.curlString);
         if (parsed.expectedField) setExpectedField(parsed.expectedField);
         if (parsed.compConfig) setCompConfig(parsed.compConfig);
+        if (parsed.customHeaders) setCustomHeaders(parsed.customHeaders);
       } catch (e) { console.error("Restore error", e); }
     }
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ testCases, curlString, expectedField, compConfig }));
-  }, [testCases, curlString, expectedField, compConfig]);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ testCases, curlString, expectedField, compConfig, customHeaders }));
+  }, [testCases, curlString, expectedField, compConfig, customHeaders]);
 
   const getValueByPath = (obj: any, path: string): string => {
     if (obj === undefined || obj === null) return '';
@@ -102,6 +108,29 @@ const App: React.FC = () => {
     setTestCases(cases);
   }, [expectedField]);
 
+  // Header helpers
+  const addHeader = () => {
+    const key = newHeaderKey.trim();
+    const value = newHeaderValue;
+    if (!key) {
+      alert('Header key is required');
+      return;
+    }
+    if (FORBIDDEN_HEADERS.includes(key.toLowerCase())) {
+      alert('This header is forbidden and cannot be set.');
+      return;
+    }
+    setCustomHeaders(prev => [...prev, { key, value }]);
+    setNewHeaderKey('');
+    setNewHeaderValue('');
+  };
+
+  const removeHeader = (index: number) => {
+    const copy = [...customHeaders];
+    copy.splice(index, 1);
+    setCustomHeaders(copy);
+  };
+
   const runTests = async () => {
     const configTemplate = parseCurl(curlString);
     if (!configTemplate.url || testCases.length === 0) {
@@ -130,8 +159,15 @@ const App: React.FC = () => {
           status = res.status;
         } else {
           const headers: any = {};
+          // from parsed curl
           Object.entries(configTemplate.headers).forEach(([k, v]) => {
             if (!FORBIDDEN_HEADERS.includes(k.toLowerCase())) headers[k] = substituteParams(v, tc.params);
+          });
+          // merge custom headers (overrides parsed ones)
+          customHeaders.forEach(h => {
+            if (h.key && !FORBIDDEN_HEADERS.includes(h.key.toLowerCase())) {
+              headers[h.key] = substituteParams(h.value, tc.params);
+            }
           });
           const res = await fetch(finalUrl, { method: configTemplate.method, headers });
           rawText = await res.text();
@@ -232,6 +268,26 @@ const App: React.FC = () => {
           <div className="space-y-3">
             <h3 className="text-[10px] font-black text-slate-500 uppercase px-2 tracking-widest flex items-center gap-2"><i className="fas fa-code text-indigo-500"></i> 1. API Template</h3>
             <textarea value={curlString} onChange={e => setCurlString(e.target.value)} className="w-full h-64 bg-[#1E293B] border border-slate-800 p-6 rounded-[2rem] font-mono text-[11px] text-emerald-400 focus:border-indigo-500 outline-none shadow-inner" placeholder="Paste Postman cURL..." />
+
+            <div className="mt-4 bg-[#111827] border border-slate-800 p-4 rounded-xl">
+              <label className="text-[9px] font-black text-indigo-400 uppercase mb-2 block">Custom Headers</label>
+              <div className="flex gap-2 items-center">
+                <input value={newHeaderKey} onChange={e => setNewHeaderKey(e.target.value)} placeholder="Header-Name (e.g. X-Custom-Header)" className="w-1/4 bg-slate-900 border border-slate-700 p-2 rounded-xl text-[11px]" />
+                <input value={newHeaderValue} onChange={e => setNewHeaderValue(e.target.value)} placeholder="Value or {param}" className="flex-1 bg-slate-900 border border-slate-700 p-2 rounded-xl text-[11px]" />
+                <button onClick={addHeader} className="bg-indigo-600 px-4 py-2 rounded-xl text-[11px] font-black">Add</button>
+              </div>
+
+              <div className="mt-3 space-y-2">
+                {customHeaders.map((h, idx) => (
+                  <div key={idx} className="flex items-center gap-2">
+                    <div className="text-[11px] font-bold">{h.key}:</div>
+                    <div className="text-[11px] text-slate-400 truncate">{h.value}</div>
+                    <button onClick={() => removeHeader(idx)} className="ml-auto text-rose-400 text-[10px] font-black">Remove</button>
+                  </div>
+                ))}
+                <p className="text-[9px] text-slate-500 italic">Note: Forbidden headers (user-agent, origin, host, cookie, etc.) are not allowed.</p>
+              </div>
+            </div> 
           </div>
 
           <div className="space-y-3">
