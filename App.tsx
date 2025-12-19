@@ -34,6 +34,15 @@ const App: React.FC = () => {
   const [customHeaders, setCustomHeaders] = useState<{key: string, value: string}[]>([]);
   const [newHeaderKey, setNewHeaderKey] = useState('');
   const [newHeaderValue, setNewHeaderValue] = useState('');
+  const [headerKeyError, setHeaderKeyError] = useState<string | null>(null);
+
+  const HEADER_NAME_RE = /^[A-Za-z0-9-]+$/;
+  const validateHeaderKey = (k: string) => {
+    if (!k || !k.trim()) return 'Header key is required';
+    if (!HEADER_NAME_RE.test(k)) return 'Invalid header key (letters, numbers and hyphen only)';
+    if (FORBIDDEN_HEADERS.includes(k.toLowerCase())) return 'This header is forbidden in browsers';
+    return null;
+  };
 
   // Persist settings and results
   useEffect(() => {
@@ -131,6 +140,30 @@ const App: React.FC = () => {
     setCustomHeaders(copy);
   };
 
+  // Preset helpers (adds or updates known headers quickly)
+  const [presetFeedback, setPresetFeedback] = useState<string | null>(null);
+  const addPreset = (key: string, value: string) => {
+    const lower = key.toLowerCase();
+    if (FORBIDDEN_HEADERS.includes(lower)) {
+      setPresetFeedback('Cannot add a forbidden header');
+      setTimeout(() => setPresetFeedback(null), 2000);
+      return;
+    }
+
+    setCustomHeaders(prev => {
+      const idx = prev.findIndex(h => h.key.toLowerCase() === lower);
+      if (idx !== -1) {
+        const copy = [...prev];
+        copy[idx] = { key, value };
+        return copy;
+      }
+      return [...prev, { key, value }];
+    });
+
+    setPresetFeedback(`${key} preset added`);
+    setTimeout(() => setPresetFeedback(null), 2000);
+  };
+
   const runTests = async () => {
     const configTemplate = parseCurl(curlString);
     if (!configTemplate.url || testCases.length === 0) {
@@ -152,13 +185,26 @@ const App: React.FC = () => {
         let rawText = '';
         let status = 0;
 
+        // Attach finalUrl for debugging
+        tc.finalUrl = finalUrl;
+
         if (fetchMode === 'bypass') {
+          // for bypass mode the user headers aren't forwarded, but still record what would be sent for debugging
+          const headersDbg: Record<string, string> = {};
+          Object.entries(configTemplate.headers).forEach(([k, v]) => {
+            if (!FORBIDDEN_HEADERS.includes(k.toLowerCase())) headersDbg[k] = substituteParams(v, tc.params);
+          });
+          customHeaders.forEach(h => {
+            if (h.key && !FORBIDDEN_HEADERS.includes(h.key.toLowerCase())) headersDbg[h.key] = substituteParams(h.value, tc.params);
+          });
+          tc.finalHeaders = headersDbg;
+
           const res = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(finalUrl)}`);
           const data = await res.json();
           rawText = data.contents;
           status = res.status;
         } else {
-          const headers: any = {};
+          const headers: Record<string, string> = {};
           // from parsed curl
           Object.entries(configTemplate.headers).forEach(([k, v]) => {
             if (!FORBIDDEN_HEADERS.includes(k.toLowerCase())) headers[k] = substituteParams(v, tc.params);
@@ -169,6 +215,12 @@ const App: React.FC = () => {
               headers[h.key] = substituteParams(h.value, tc.params);
             }
           });
+
+          // Store final headers used for this test case for debugging
+          tc.finalHeaders = { ...headers };
+
+          console.debug('Request for', tc.id, { url: finalUrl, headers: tc.finalHeaders });
+
           const res = await fetch(finalUrl, { method: configTemplate.method, headers });
           rawText = await res.text();
           status = res.status;
@@ -270,12 +322,19 @@ const App: React.FC = () => {
             <textarea value={curlString} onChange={e => setCurlString(e.target.value)} className="w-full h-64 bg-[#1E293B] border border-slate-800 p-6 rounded-[2rem] font-mono text-[11px] text-emerald-400 focus:border-indigo-500 outline-none shadow-inner" placeholder="Paste Postman cURL..." />
 
             <div className="mt-4 bg-[#111827] border border-slate-800 p-4 rounded-xl">
-              <label className="text-[9px] font-black text-indigo-400 uppercase mb-2 block">Custom Headers</label>
-              <div className="flex gap-2 items-center">
-                <input value={newHeaderKey} onChange={e => setNewHeaderKey(e.target.value)} placeholder="Header-Name (e.g. X-Custom-Header)" className="w-1/4 bg-slate-900 border border-slate-700 p-2 rounded-xl text-[11px]" />
-                <input value={newHeaderValue} onChange={e => setNewHeaderValue(e.target.value)} placeholder="Value or {param}" className="flex-1 bg-slate-900 border border-slate-700 p-2 rounded-xl text-[11px]" />
-                <button onClick={addHeader} className="bg-indigo-600 px-4 py-2 rounded-xl text-[11px] font-black">Add</button>
+              <div className="flex items-start justify-between">
+                <label className="text-[9px] font-black text-indigo-400 uppercase mb-2 block">Custom Headers</label>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => addPreset('x-api-key', 'iVf8NMjXY7Jmb8pjfKG75gumhnjVKvmasH8cEEt2')} className="text-[10px] bg-emerald-600 px-3 py-1 rounded-xl font-black">Add x-api-key</button>
+                </div>
               </div>
+
+              <div className="flex gap-2 items-center">
+                <input value={newHeaderKey} onChange={e => { setNewHeaderKey(e.target.value); setHeaderKeyError(validateHeaderKey(e.target.value)); }} placeholder="Header-Name (e.g. X-Custom-Header)" className="w-1/4 bg-slate-900 border border-slate-700 p-2 rounded-xl text-[11px]" />
+                <input value={newHeaderValue} onChange={e => setNewHeaderValue(e.target.value)} placeholder="Value or {param}" className="flex-1 bg-slate-900 border border-slate-700 p-2 rounded-xl text-[11px]" />
+                <button onClick={addHeader} disabled={!!headerKeyError || !newHeaderKey.trim()} className="bg-indigo-600 px-4 py-2 rounded-xl text-[11px] font-black disabled:opacity-30">Add</button>
+              </div>
+              {headerKeyError && <div className="text-[10px] text-rose-400 mt-2">{headerKeyError}</div>} 
 
               <div className="mt-3 space-y-2">
                 {customHeaders.map((h, idx) => (
@@ -286,6 +345,7 @@ const App: React.FC = () => {
                   </div>
                 ))}
                 <p className="text-[9px] text-slate-500 italic">Note: Forbidden headers (user-agent, origin, host, cookie, etc.) are not allowed.</p>
+                {presetFeedback && <div className="text-[10px] text-emerald-400 mt-2">{presetFeedback}</div>}
               </div>
             </div> 
           </div>
@@ -436,6 +496,20 @@ const App: React.FC = () => {
                    </div>
                    <div className="bg-[#0F172A] p-6 rounded-[2rem] font-mono text-[10px] h-48 overflow-auto border border-slate-800 text-emerald-500/80 whitespace-pre-wrap shadow-inner custom-scrollbar">
                       {selectedCase.actualResponse || "No data captured yet."}
+                   </div>
+
+                   <div className="mt-3">
+                     <h5 className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Request URL</h5>
+                     <div className="bg-slate-900 p-4 rounded-lg border border-slate-800 text-[11px] font-mono break-words">{selectedCase.finalUrl || 'N/A'}</div>
+
+                     <h5 className="text-[10px] font-black text-slate-500 uppercase tracking-widest mt-4 mb-2">Request Headers</h5>
+                     <div className="bg-slate-900 p-4 rounded-lg border border-slate-800 text-[11px] whitespace-pre-wrap font-mono">
+                       {selectedCase.finalHeaders ? (
+                         Object.entries(selectedCase.finalHeaders).map(([k, v]) => (
+                           <div key={k}><span className="text-slate-500">{k}:</span> {v}</div>
+                         ))
+                       ) : <div className="italic text-slate-500">No headers recorded for this case.</div>}
+                     </div>
                    </div>
                 </div>
 

@@ -24,6 +24,7 @@ export interface TestCase {
   executionTime?: number;
   finalUrl?: string; // Added for debugging 404s
   finalBody?: string | null; // Added for debugging
+  finalHeaders?: Record<string, string>; // Added to inspect per-run headers
   statusCode?: number; // To track 404, 500, etc.
 }
 
