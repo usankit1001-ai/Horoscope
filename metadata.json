@@ -1,0 +1,5 @@
+{
+  "name": "Horoscope QA Automation Suite",
+  "description": "A professional-grade testing utility for senior QA engineers to automate horoscope API validations. Parse cURL commands, execute bulk combinations from CSV, and compare actual responses against expected results with detailed reporting and export capabilities.",
+  "requestFramePermissions": []
+}
