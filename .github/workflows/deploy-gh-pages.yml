@@ -6,6 +6,10 @@ on:
       - main
       - 'deploy/**'
 
+permissions:
+  contents: write
+  pages: write
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
