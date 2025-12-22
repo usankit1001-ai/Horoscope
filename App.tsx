@@ -135,7 +135,7 @@ const App: React.FC = () => {
   };
 
   // Run a quick diagnostic request to check whether the server receives the custom headers
-  const runHeaderDiagnostic = async () => {
+  const runHeaderDiagnostic = async (useStatic: boolean = false) => {
     setDiagLoading(true);
     setDiagStatus(null);
     setServerHeaderError(false);
@@ -150,19 +150,44 @@ const App: React.FC = () => {
 
     try {
       const testUrl = 'https://stagingapi.astroapi.com/api/v1/prediction/monthly?language=eng&month=1&year=2026&report=LOVE&zodiac=ARIES';
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      customHeaders.forEach(h => { if (h.key && !FORBIDDEN_HEADERS.includes(h.key.toLowerCase())) headers[h.key] = h.value; });
 
+      // First, do an OPTIONS preflight check to inspect Access-Control-Allow-Headers
+      try {
+        const preflight = await fetch(testUrl, { method: 'OPTIONS' });
+        const allowed = preflight.headers.get('access-control-allow-headers') || '';
+        if (!/x-api-key/i.test(allowed)) {
+          setDiagStatus('Preflight check: server CORS does not allow "x-api-key" in Access-Control-Allow-Headers. Backend needs to add this header.');
+          setServerHeaderError(true);
+          setHeaderErrorMessage(`Access-Control-Allow-Headers: ${allowed}`);
+          setDiagLoading(false);
+          return;
+        }
+      } catch (pfErr: any) {
+        // If OPTIONS call fails, continue to attempt a GET (some servers may not require OPTIONS)
+        console.debug('Preflight OPTIONS failed', pfErr);
+      }
+
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
+      if (useStatic) {
+        // Use a known static x-api-key for deterministic testing
+        const STATIC_API_KEY = 'iVf8NMjXY7Jmb8pjfKG75gumhnjVKvmasH8cEEt2';
+        headers['x-api-key'] = STATIC_API_KEY;
+      } else {
+        customHeaders.forEach(h => { if (h.key && !FORBIDDEN_HEADERS.includes(h.key.toLowerCase())) headers[h.key] = h.value; });
+      }
+
+      // Make an actual GET with headers to verify server acceptance
       const res = await fetch(testUrl, { method: 'GET', headers });
       const text = await res.text();
 
       if (res.status === 200 && text && !String(text).toLowerCase().includes('please set custom header')) {
         setDiagStatus('Header diagnostic: Server accepted headers (OK).');
         setServerHeaderError(false);
-      } else if (String(text).toLowerCase().includes('please set custom header')) {
-        setDiagStatus('Header diagnostic: Server responded: "Please set custom header" — missing/incorrect header.');
+      } else if (String(text).toLowerCase().includes('please set custom header') || res.status === 401) {
+        setDiagStatus('Header diagnostic: Server indicated missing/invalid header (401 or message).');
         setServerHeaderError(true);
-        setHeaderErrorMessage(text);
+        setHeaderErrorMessage(text || `status=${res.status}`);
       } else {
         setDiagStatus(`Header diagnostic: unexpected response (status=${res.status}).`);
       }
@@ -180,6 +205,38 @@ const App: React.FC = () => {
     addPreset('x-api-key', value);
   };
 
+
+  const [baselineValidationSummary, setBaselineValidationSummary] = useState<string | null>(null);
+  const [baselineValidationSamples, setBaselineValidationSamples] = useState<Array<{ inputIdx: number; testCaseId?: string; matched: boolean; reason?: string }>>([]);
+
+  // Validate a handful of rows to ensure baseline CSV matches input month/zodiac
+  const validateBaselineMapping = () => {
+    if (!inputRows || inputRows.length === 0) {
+      setBaselineValidationSummary('No input scenarios loaded');
+      setBaselineValidationSamples([]);
+      return;
+    }
+    if (!expectedRows || expectedRows.length === 0) {
+      setBaselineValidationSummary('No baseline file loaded');
+      setBaselineValidationSamples([]);
+      return;
+    }
+
+    const total = inputRows.length;
+    let matched = 0;
+    const samples: Array<{ inputIdx: number; testCaseId?: string; matched: boolean; reason?: string }> = [];
+
+    for (let i = 0; i < Math.min(20, inputRows.length); i++) {
+      const row = inputRows[i];
+      const found = findBaselineForRow(row, expectedRows);
+      const ok = !!found && String(found).trim() !== '';
+      if (ok) matched++;
+      samples.push({ inputIdx: i, testCaseId: row['test_case_id'], matched: ok, reason: ok ? 'Matched' : 'No matching month/zodiac entry found' });
+    }
+
+    setBaselineValidationSummary(`Baseline quick-check: ${matched} / ${Math.min(20, total)} matched (first 20)`);
+    setBaselineValidationSamples(samples);
+  };
 
   // Persist settings and results
   useEffect(() => {
@@ -228,20 +285,125 @@ const App: React.FC = () => {
     return typeof obj === 'string' ? obj : '';
   };
 
+  // Helper: generate month-format candidates for matching baseline CSV
+  const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const makeMonthCandidates = (monthInput: string | number | undefined, yearInput: string | number | undefined) => {
+    const candidates: string[] = [];
+    if (!monthInput || !yearInput) return candidates;
+
+    const monthStr = String(monthInput).trim();
+    const yearStr = String(yearInput).trim();
+    const yearShort = yearStr.length >= 2 ? yearStr.slice(-2) : yearStr;
+
+    // direct text/year combo (e.g., Jan + 2026 => Jan-2026)
+    candidates.push(`${monthStr}-${yearStr}`);
+
+    // numeric month
+    const m = Number(monthStr);
+    if (!isNaN(m) && m >= 1 && m <= 12) {
+      candidates.push(`${m}-${yearStr}`);
+      candidates.push(`${String(m).padStart(2, '0')}-${yearStr}`);
+      candidates.push(`${monthNames[m - 1]}-${yearShort}`);
+      candidates.push(`${monthNames[m - 1]}-${yearStr}`);
+    }
+
+    // formats like 'Jan-26' or 'Jan-2026'
+    const match = monthStr.match(/^([A-Za-z]{3})-(\d{2,4})$/);
+    if (match) {
+      const mName = match[1];
+      const y = match[2];
+      candidates.push(`${mName}-${y}`);
+      if (y.length === 2) candidates.push(`${mName}-${'20' + y}`);
+    }
+
+    // also include short/long year variants
+    if (yearStr.length === 4) {
+      const yShort = yearStr.slice(-2);
+      candidates.push(`${monthStr}-${yShort}`);
+    }
+
+    // dedupe preserving order
+    return Array.from(new Set(candidates));
+  };
+
+  // Find a baseline description using multiple candidate formats and case-insensitive zodiac matching
+  const findBaselineForRow = (row: Record<string, string>, expecteds: Record<string, string>[]) => {
+    const tryMatch = (zodiac: string, monthCandidates: string[]) => {
+      for (const c of monthCandidates) {
+        const found = expecteds.find(e => (e.month || '').toLowerCase() === c.toLowerCase() && (e.zodiac_name || '').toLowerCase() === zodiac);
+        if (found) return found.description || '';
+      }
+      return '';
+    };
+
+    // 1) If expected_csv_key is present, try parse and match (and try nearby years)
+    if (row['expected_csv_key']) {
+      const parts = (row['expected_csv_key'] || '').split('_');
+      if (parts.length >= 3) {
+        const zodiac = parts[0].toLowerCase();
+        const expYear = parts[1];
+        const expMonth = parts[2];
+
+        // try exact year and +/-1 year as sometimes baseline uses short/adjacent year
+        const yearInts: string[] = [];
+        if (/^\d{2,4}$/.test(expYear)) {
+          const yNum = Number(expYear);
+          yearInts.push(expYear);
+          yearInts.push(String(yNum - 1));
+          yearInts.push(String(yNum + 1));
+          // also try 20XX / XX forms
+          if (expYear.length === 2) yearInts.push('20' + expYear);
+          if (expYear.length === 4) yearInts.push(expYear.slice(-2));
+        } else {
+          yearInts.push(expYear);
+        }
+
+        for (const y of Array.from(new Set(yearInts))) {
+          const candidates = makeMonthCandidates(expMonth, y);
+          const found = tryMatch(zodiac, candidates);
+          if (found) return found;
+        }
+      }
+    }
+
+    // 2) Try to match by explicit month/year/zodiac columns (also try nearby years)
+    const colMonth = row['month'] || row['month_number'] || row['MM'];
+    const colYear = row['year'] || row['y'];
+    const zodiacName = (row['zodiac'] || row['zodiac_name'] || '').toLowerCase();
+
+    if (colMonth && colYear && zodiacName) {
+      const ynum = Number(colYear);
+      const yearsToTry = [String(colYear), String(ynum - 1), String(ynum + 1)];
+      for (const y of Array.from(new Set(yearsToTry))) {
+        const candidates = makeMonthCandidates(colMonth, y);
+        const found = tryMatch(zodiacName, candidates);
+        if (found) return found;
+      }
+    }
+
+    // No loose fallback by zodiac-only; prefer explicit month/year matches. Return empty if not found.
+    return '';
+  };
+
   const generateTestCases = useCallback((inputs: Record<string, string>[], expecteds: Record<string, string>[]) => {
     if (inputs.length === 0) return;
     const cases: TestCase[] = inputs.map((row, idx) => {
-      // Logic to find the baseline: Look for user-defined field, then 'description', then first available column
+      // Try to resolve baseline using helper
       let expectedVal = '';
-      const sourceRow = (expecteds.length > 0 ? expecteds[idx] : row) || {};
-      
-      if (sourceRow[expectedField]) {
-        expectedVal = sourceRow[expectedField];
-      } else if (sourceRow['description']) {
-        expectedVal = sourceRow['description'];
-      } else {
-        // Fallback to the first column if the specified one isn't found
-        expectedVal = Object.values(sourceRow)[0] || '';
+      if (expecteds.length > 0) {
+        expectedVal = findBaselineForRow(row, expecteds);
+      }
+
+      // If still empty, try fallback: pick sourceRow using index or row's own description
+      if (!expectedVal) {
+        const sourceRow = (expecteds.length > 0 ? expecteds[idx] : row) || {};
+        if (sourceRow[expectedField]) {
+          expectedVal = sourceRow[expectedField];
+        } else if (sourceRow['description']) {
+          expectedVal = sourceRow['description'];
+        } else {
+          expectedVal = Object.values(sourceRow)[0] || '';
+        }
       }
 
       return {
@@ -254,11 +416,43 @@ const App: React.FC = () => {
     setTestCases(cases);
   }, [expectedField]);
 
+  const checkPreflightAllowsHeaders = async () => {
+    if (fetchMode === 'bypass') return true; // proxy won't forward, but caller should handle mode
+    if (customHeaders.length === 0) return true;
+    try {
+      const testUrl = 'https://stagingapi.astroapi.com/api/v1/prediction/monthly?language=eng&month=1&year=2026&report=LOVE&zodiac=ARIES';
+      const preflight = await fetch(testUrl, { method: 'OPTIONS' });
+      const allowed = preflight.headers.get('access-control-allow-headers') || '';
+      // make sure each custom header key is allowed
+      for (const h of customHeaders) {
+        if (h.key && !new RegExp(h.key, 'i').test(allowed)) {
+          setDiagStatus('Preflight: server does not allow required custom header(s).');
+          setHeaderErrorMessage(`Access-Control-Allow-Headers: ${allowed}`);
+          return false;
+        }
+      }
+      return true;
+    } catch (e: any) {
+      setDiagStatus('Preflight failed: cannot verify Access-Control-Allow-Headers');
+      setHeaderErrorMessage(String(e.message));
+      return false;
+    }
+  };
+
   const runTests = async () => {
     const configTemplate = parseCurl(curlString);
     if (!configTemplate.url || testCases.length === 0) {
       alert('Missing requirements.');
       return;
+    }
+
+    // If custom headers are present, sanity-check preflight before running
+    if (customHeaders.length > 0 && fetchMode === 'direct') {
+      const ok = await checkPreflightAllowsHeaders();
+      if (!ok) {
+        alert('CORS preflight check failed: server does not allow one or more custom headers (see Test Headers). Aborting run.');
+        return;
+      }
     }
 
     setIsRunning(true);
@@ -359,8 +553,23 @@ const App: React.FC = () => {
           targetValue = getValueByPath(json, compConfig.jsonPath);
         } catch { targetValue = rawText; }
 
+        // Comparison: exact contains OR token-overlap similarity (helps handle minor differences)
+        const normalize = (s: string) => (s || '').toLowerCase().replace(/[\p{P}\p{S}]/gu, ' ').replace(/\s+/g, ' ').trim();
+        const expectedNorm = normalize(tc.expectedResult || '');
+        const extractedNorm = normalize(String(targetValue || ''));
+
+        const containsMatch = expectedNorm !== '' && extractedNorm.includes(expectedNorm);
+        let similarityMatch = false;
+        if (!containsMatch && expectedNorm !== '' && extractedNorm !== '') {
+          const expectedTokens = expectedNorm.split(' ');
+          const extractedTokens = new Set(extractedNorm.split(' '));
+          const common = expectedTokens.filter(t => extractedTokens.has(t));
+          const overlapRatio = expectedTokens.length > 0 ? (common.length / expectedTokens.length) : 0;
+          similarityMatch = overlapRatio >= 0.55; // threshold
+        }
+
         tc.comparedValue = targetValue;
-        tc.status = targetValue.toLowerCase().includes(tc.expectedResult.toLowerCase()) ? TestStatus.PASSED : TestStatus.FAILED;
+        tc.status = (containsMatch || similarityMatch) ? TestStatus.PASSED : TestStatus.FAILED;
 
       } catch (err: any) {
         tc.status = TestStatus.ERROR;
@@ -398,6 +607,128 @@ const App: React.FC = () => {
     setManualResponse('');
     setSyncFeedback(true);
     setTimeout(() => setSyncFeedback(false), 2000);
+  };
+
+  // Run a single test case (keeps dynamic headers, retry logic, and diagnostics)
+  const runSingleTest = async (caseParam?: TestCase) => {
+    if (!caseParam) return;
+    const configTemplate = parseCurl(curlString);
+    if (!configTemplate.url) {
+      alert('Missing cURL template');
+      return;
+    }
+
+    // If custom headers present, ensure preflight permits them before running single test
+    if (customHeaders.length > 0 && fetchMode === 'direct') {
+      const ok = await checkPreflightAllowsHeaders();
+      if (!ok) {
+        alert('CORS preflight check failed: server does not allow one or more custom headers (see Test Headers). Aborting run.');
+        return;
+      }
+    }
+
+    const updated = [...testCases];
+    const idx = updated.findIndex(c => c.id === caseParam.id);
+    if (idx === -1) return;
+
+    const tc = updated[idx];
+    tc.status = TestStatus.RUNNING;
+    setTestCases([...updated]);
+
+    const MAX_ATTEMPTS = 3;
+    const ATTEMPT_DELAY_MS = 2000;
+
+    try {
+      const finalUrl = substituteParams(configTemplate.url, tc.params);
+      tc.finalUrl = finalUrl;
+
+      let rawText = '';
+      let status = 0;
+      let attempt = 0;
+      let success = false;
+
+      // If custom headers are present and mode is bypass, switch to direct for this test
+      if (customHeaders.length > 0 && fetchMode === 'bypass') {
+        setPresetFeedback('Custom headers detected: switching to Direct mode');
+        setFetchMode('direct');
+      }
+
+      while (attempt < MAX_ATTEMPTS && !success) {
+        attempt++;
+        try {
+          if (fetchMode === 'bypass') {
+            const headersDbg: Record<string, string> = {};
+            Object.entries(configTemplate.headers).forEach(([k, v]) => {
+              if (!FORBIDDEN_HEADERS.includes(k.toLowerCase())) headersDbg[k] = substituteParams(v, tc.params);
+            });
+            customHeaders.forEach(h => {
+              if (h.key && !FORBIDDEN_HEADERS.includes(h.key.toLowerCase())) headersDbg[h.key] = substituteParams(h.value, tc.params);
+            });
+            tc.finalHeaders = headersDbg;
+
+            const res = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(finalUrl)}`);
+            const data = await res.json();
+            rawText = data.contents;
+            status = res.status;
+          } else {
+            const headers: Record<string, string> = {};
+            Object.entries(configTemplate.headers).forEach(([k, v]) => {
+              if (!FORBIDDEN_HEADERS.includes(k.toLowerCase())) headers[k] = substituteParams(v, tc.params);
+            });
+
+            customHeaders.forEach(h => {
+              if (h.key && !FORBIDDEN_HEADERS.includes(h.key.toLowerCase())) {
+                headers[h.key] = substituteParams(h.value, tc.params);
+              }
+            });
+
+            tc.finalHeaders = { ...headers };
+
+            const res = await fetch(finalUrl, { method: configTemplate.method, headers });
+            rawText = await res.text();
+            status = res.status;
+          }
+
+          if (status === 200 && rawText && rawText.trim() !== '') {
+            if (String(rawText).toLowerCase().includes('please set custom header')) {
+              setServerHeaderError(true);
+              setHeaderErrorMessage(rawText);
+              setPresetFeedback('Server indicates a custom header is required. Use Test Headers to diagnose or add x-api-key preset.');
+              if (attempt < MAX_ATTEMPTS) await new Promise(r => setTimeout(r, ATTEMPT_DELAY_MS));
+            } else {
+              success = true;
+            }
+          } else {
+            if (attempt < MAX_ATTEMPTS) await new Promise(r => setTimeout(r, ATTEMPT_DELAY_MS));
+          }
+        } catch (err) {
+          if (attempt < MAX_ATTEMPTS) await new Promise(r => setTimeout(r, ATTEMPT_DELAY_MS));
+        }
+      }
+
+      tc.statusCode = status;
+      tc.actualResponse = rawText;
+
+      let targetValue = '';
+      try {
+        const json = JSON.parse(rawText);
+        targetValue = getValueByPath(json, compConfig.jsonPath);
+      } catch {
+        targetValue = rawText;
+      }
+
+      tc.comparedValue = targetValue;
+      tc.status = targetValue.toLowerCase().includes(tc.expectedResult.toLowerCase()) ? TestStatus.PASSED : TestStatus.FAILED;
+
+    } catch (err: any) {
+      tc.status = TestStatus.ERROR;
+      tc.actualResponse = `Error: ${err.message}`;
+    }
+
+    updated[idx] = tc;
+    setTestCases([...updated]);
+
+    if (selectedCase && selectedCase.id === tc.id) setSelectedCase({ ...tc });
   };
 
   return (
@@ -459,7 +790,8 @@ const App: React.FC = () => {
                 <label className="text-[9px] font-black text-indigo-400 uppercase mb-2 block">Custom Headers</label>
                 <div className="flex items-center gap-2">
                   <button onClick={() => addPreset('x-api-key', 'iVf8NMjXY7Jmb8pjfKG75gumhnjVKvmasH8cEEt2')} className="text-[10px] bg-emerald-600 px-3 py-1 rounded-xl font-black">Add x-api-key</button>
-                  <button onClick={runHeaderDiagnostic} disabled={diagLoading} className="text-[10px] bg-sky-600 px-3 py-1 rounded-xl font-black">{diagLoading ? 'Testing...' : 'Test Headers'}</button>
+                  <button onClick={() => runHeaderDiagnostic(true)} disabled={diagLoading} className="text-[10px] bg-indigo-500 px-3 py-1 rounded-xl font-black">Test w/ x-api-key</button>
+                  <button onClick={() => runHeaderDiagnostic(false)} disabled={diagLoading} className="text-[10px] bg-sky-600 px-3 py-1 rounded-xl font-black">{diagLoading ? 'Testing...' : 'Test Headers'}</button>
                 </div>
               </div>
 
@@ -495,7 +827,20 @@ const App: React.FC = () => {
                         </div>
                       )}
                     </div>
+
                     {headerErrorMessage && <pre className="mt-2 text-xs whitespace-pre-wrap bg-black/10 p-2 rounded">{String(headerErrorMessage)}</pre>}
+
+                    {/* Helpful action when preflight reveals x-api-key is missing */}
+                    {serverHeaderError && headerErrorMessage && String(headerErrorMessage).toLowerCase().includes('access-control-allow-headers') && (
+                      <div className="mt-3 text-[11px] bg-black/10 p-3 rounded">
+                        <div className="font-bold mb-1">Suggested fix</div>
+                        <div className="text-[10px] text-slate-300 space-y-1">
+                          <div>Add <code>"x-api-key"</code> to the server's <code>Access-Control-Allow-Headers</code> for the API origin so browsers can send the header.</div>
+                          <div className="mt-2">Example (Express + cors): <code>{`app.use(cors({ origin: true, allowedHeaders: ['Content-Type','x-api-key','Authorization'] }))`}</code></div>
+                          <div className="mt-1">Nginx example: <code>add_header 'Access-Control-Allow-Headers' 'Origin, X-Requested-With, Content-Type, Accept, Language, x-api-key';</code></div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -537,6 +882,35 @@ const App: React.FC = () => {
               }} className="absolute inset-0 opacity-0 cursor-pointer" />
               <i className="fas fa-bullseye text-3xl text-slate-700 mb-4 group-hover:text-emerald-500 transition-colors"></i>
               <p className="text-[10px] font-black uppercase text-slate-500">{expectedRows.length > 0 ? `${expectedRows.length} BASELINES LOADED` : 'UPLOAD EXPECTED'}</p>
+
+              <div className="mt-4 text-[10px] text-slate-400">
+                <div className="font-bold mb-1">Expected baseline CSV format</div>
+                <div className="mb-2">The baseline must include columns: <code>month</code> (e.g., <code>Jan-26</code>), <code>zodiac_name</code> (e.g., <code>aries</code>), <code>title</code>, and <code>description</code>. Matching is case-insensitive and supports several month formats.</div>
+                <div className="flex gap-2">
+                  <button onClick={() => {
+                    const sample = [{ month: 'Jan-26', zodiac_name: 'aries', title: 'Aries Monthly Horoscope', description: 'This month begins with...' }];
+                    downloadCSV(sample, 'baseline_sample.csv');
+                  }} className="bg-emerald-600 px-3 py-1 rounded-xl text-[10px] font-black">Download sample baseline</button>
+                  <button onClick={() => navigator.clipboard?.writeText('month,zodiac_name,title,description\nJan-26,aries,Aries Monthly Horoscope,This month begins with...')?.then(()=>setPresetFeedback('Sample copied to clipboard'))} className="bg-sky-600 px-3 py-1 rounded-xl text-[10px] font-black">Copy CSV header</button>
+                  <button onClick={() => validateBaselineMapping()} className="bg-indigo-600 px-3 py-1 rounded-xl text-[10px] font-black">Validate mapping (first 20)</button>
+                </div>
+                {presetFeedback && <div className="text-[10px] text-emerald-400 mt-2">{presetFeedback}</div>}
+
+                {baselineValidationSummary && (
+                  <div className="mt-3 text-[11px] bg-black/10 p-3 rounded">
+                    <div className="font-bold mb-1">{baselineValidationSummary}</div>
+                    <div className="text-[10px] text-slate-300">
+                      {baselineValidationSamples.map(s => (
+                        <div key={s.inputIdx} className={`flex items-center gap-2 ${s.matched ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          <div className="font-bold">#{s.inputIdx + 1}</div>
+                          <div className="text-[10px]">{s.testCaseId || ''}</div>
+                          <div className="ml-auto text-[10px]">{s.matched ? 'Matched' : s.reason}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
@@ -603,7 +977,10 @@ const App: React.FC = () => {
                          }`}>{tc.status}</span>
                        </td>
                        <td className="p-5 px-8 text-center">
-                         <button onClick={() => setSelectedCase(tc)} className="bg-slate-800 hover:bg-indigo-600 px-6 py-2 rounded-xl text-[10px] font-black uppercase transition-all shadow-lg active:scale-95">Verify</button>
+                         <div className="flex items-center justify-center gap-2">
+                           <button onClick={() => runSingleTest(tc)} className="bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded-xl text-[10px] font-black uppercase transition-all shadow-lg active:scale-95">Run</button>
+                           <button onClick={() => setSelectedCase(tc)} className="bg-slate-800 hover:bg-indigo-600 px-6 py-2 rounded-xl text-[10px] font-black uppercase transition-all shadow-lg active:scale-95">Verify</button>
+                         </div>
                        </td>
                      </tr>
                    ))}
@@ -622,7 +999,10 @@ const App: React.FC = () => {
                    <h3 className="text-lg font-black uppercase tracking-tight">Validation Trace</h3>
                    <span className="text-[10px] font-bold bg-indigo-500/10 text-indigo-400 px-3 py-1 rounded-full border border-indigo-500/20">CASE #{testCases.findIndex(c => c.id === selectedCase.id) + 1}</span>
                 </div>
-                <button onClick={() => setSelectedCase(null)} className="w-10 h-10 bg-slate-800 rounded-full flex items-center justify-center hover:bg-rose-500 transition-all shadow-lg"><i className="fas fa-times"></i></button>
+                <div className="flex items-center gap-3">
+                  <button onClick={() => runSingleTest(selectedCase)} className="bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded-xl text-[11px] font-black uppercase transition-all shadow-lg">Run Case</button>
+                  <button onClick={() => setSelectedCase(null)} className="w-10 h-10 bg-slate-800 rounded-full flex items-center justify-center hover:bg-rose-500 transition-all shadow-lg"><i className="fas fa-times"></i></button>
+                </div>
              </div>
              
              <div className="p-10 overflow-y-auto space-y-10 flex-1">
