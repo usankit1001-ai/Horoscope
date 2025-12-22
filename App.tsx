@@ -11,6 +11,7 @@ const FORBIDDEN_HEADERS = [
 ];
 
 const STORAGE_KEY = 'horoscope_qa_v3';
+const DEFAULT_API_KEY = 'iVf8NMjXY7Jmb8pjfKG75gumhnjVKvmasH8cEEt2';
 
 // Error boundary to catch runtime render errors and show a helpful message instead of a white screen
 class ErrorBoundary extends React.Component<any, { hasError: boolean; error: any }> {
@@ -54,7 +55,7 @@ const App: React.FC = () => {
   const [progress, setProgress] = useState(0);
   const [expectedField, setExpectedField] = useState('description');
   const [selectedCase, setSelectedCase] = useState<TestCase | null>(null);
-  const [fetchMode, setFetchMode] = useState<'bypass' | 'direct'>('bypass');
+  const [fetchMode, setFetchMode] = useState<'bypass' | 'direct'>('direct');
   const [manualResponse, setManualResponse] = useState('');
   const [syncFeedback, setSyncFeedback] = useState(false);
 
@@ -64,7 +65,7 @@ const App: React.FC = () => {
   });
 
   // Simple custom headers support (key/value list, persisted)
-  const [customHeaders, setCustomHeaders] = useState<{key: string, value: string}[]>([]);
+  const [customHeaders, setCustomHeaders] = useState<{key: string, value: string}[]>([{ key: 'x-api-key', value: DEFAULT_API_KEY }]);
   const [newHeaderKey, setNewHeaderKey] = useState('');
   const [newHeaderValue, setNewHeaderValue] = useState('');
   const [headerKeyError, setHeaderKeyError] = useState<string | null>(null);
@@ -141,33 +142,42 @@ const App: React.FC = () => {
     setServerHeaderError(false);
     setHeaderErrorMessage(null);
 
-    // If user is on proxy mode, warn that headers may not be forwarded
-    if (fetchMode === 'bypass') {
-      setDiagStatus('Warning: Proxy mode may not forward custom headers. Switch to Direct to test headers.');
-      setDiagLoading(false);
-      return;
-    }
-
     try {
       const testUrl = 'https://stagingapi.astroapi.com/api/v1/prediction/monthly?language=eng&month=1&year=2026&report=LOVE&zodiac=ARIES';
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       customHeaders.forEach(h => { if (h.key && !FORBIDDEN_HEADERS.includes(h.key.toLowerCase())) headers[h.key] = h.value; });
 
-      const res = await fetch(testUrl, { method: 'GET', headers });
-      const text = await res.text();
-
-      if (res.status === 200 && text && !String(text).toLowerCase().includes('please set custom header')) {
-        setDiagStatus('Header diagnostic: Server accepted headers (OK).');
-        setServerHeaderError(false);
-      } else if (String(text).toLowerCase().includes('please set custom header')) {
-        setDiagStatus('Header diagnostic: Server responded: "Please set custom header" — missing/incorrect header.');
-        setServerHeaderError(true);
-        setHeaderErrorMessage(text);
-      } else {
-        setDiagStatus(`Header diagnostic: unexpected response (status=${res.status}).`);
+      // Try direct first (succeeds only if API CORS allows the header)
+      try {
+        const res = await fetch(testUrl, { method: 'GET', headers });
+        const text = await res.text();
+        if (res.ok && text) {
+          setDiagStatus('x-api-key attached for requests (direct mode).');
+          setServerHeaderError(false);
+        } else {
+          setDiagStatus(`Header diagnostic: status=${res.status}. Browser may be blocking headers; try Proxy mode.`);
+          setServerHeaderError(true);
+        }
+      } catch (directErr: any) {
+        // Fallback: attempt proxy fetch (no headers forwarded) to confirm connectivity
+        try {
+          const proxyRes = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(testUrl)}`);
+          if (proxyRes.ok) {
+            setDiagStatus('Direct request blocked (likely CORS). Proxy reachable but cannot forward custom headers.');
+            setServerHeaderError(true);
+          } else {
+            setDiagStatus(`Header diagnostic failed: ${proxyRes.status}`);
+            setServerHeaderError(true);
+          }
+        } catch {
+          setDiagStatus(`Header diagnostic failed: ${directErr.message}`);
+          setServerHeaderError(true);
+        }
       }
+
     } catch (e: any) {
       setDiagStatus(`Header diagnostic failed: ${e.message}`);
+      setServerHeaderError(true);
     }
 
     setDiagLoading(false);
@@ -195,6 +205,14 @@ const App: React.FC = () => {
       } catch (e) { console.error("Restore error", e); }
     }
   }, []);
+
+  // Ensure x-api-key is always present
+  useEffect(() => {
+    const hasApiKey = customHeaders.some(h => h.key.toLowerCase() === 'x-api-key');
+    if (!hasApiKey) {
+      setCustomHeaders(prev => [...prev, { key: 'x-api-key', value: DEFAULT_API_KEY }]);
+    }
+  }, [customHeaders]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ testCases, curlString, expectedField, compConfig, customHeaders }));
@@ -334,8 +352,9 @@ const App: React.FC = () => {
               // Detect server message about missing headers
               if (String(rawText).toLowerCase().includes('please set custom header')) {
                 setServerHeaderError(true);
-                setHeaderErrorMessage(rawText);
-                setPresetFeedback('Server indicates a custom header is required. Use Test Headers to diagnose or add x-api-key preset.');
+                setHeaderErrorMessage(null);
+                autoAddApiKeyPresetIfMissing(DEFAULT_API_KEY);
+                setPresetFeedback('x-api-key applied automatically.');
                 // don't treat this as success — allow retries in case header is transient
                 if (attempt < MAX_ATTEMPTS) await new Promise(r => setTimeout(r, ATTEMPT_DELAY_MS));
               } else {
@@ -478,10 +497,6 @@ const App: React.FC = () => {
                     <button onClick={() => removeHeader(idx)} className="ml-auto text-rose-400 text-[10px] font-black">Remove</button>
                   </div>
                 ))}
-
-                <div className="flex items-center gap-2">
-                  <p className="text-[9px] text-slate-500 italic">Note: Forbidden headers (user-agent, origin, host, cookie, etc.) are not allowed.</p>
-                </div>
 
                 {presetFeedback && <div className="text-[10px] text-emerald-400 mt-2">{presetFeedback}</div>}
 
@@ -703,3 +718,5 @@ const App: React.FC = () => {
 };
 
 export default App;
+
+
