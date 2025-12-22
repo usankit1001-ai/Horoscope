@@ -30,19 +30,8 @@ const App: React.FC = () => {
     strategy: MatchStrategy.CONTAINS
   });
 
-  // Custom headers support (key/value entries editable in the UI)
-  const [customHeaders, setCustomHeaders] = useState<{key: string, value: string}[]>([]);
-  const [newHeaderKey, setNewHeaderKey] = useState('');
-  const [newHeaderValue, setNewHeaderValue] = useState('');
-  const [headerKeyError, setHeaderKeyError] = useState<string | null>(null);
+  // Custom headers disabled (removed per request)
 
-  const HEADER_NAME_RE = /^[A-Za-z0-9-]+$/;
-  const validateHeaderKey = (k: string) => {
-    if (!k || !k.trim()) return 'Header key is required';
-    if (!HEADER_NAME_RE.test(k)) return 'Invalid header key (letters, numbers and hyphen only)';
-    if (FORBIDDEN_HEADERS.includes(k.toLowerCase())) return 'This header is forbidden in browsers';
-    return null;
-  };
 
   // Persist settings and results
   useEffect(() => {
@@ -54,14 +43,13 @@ const App: React.FC = () => {
         if (parsed.curlString) setCurlString(parsed.curlString);
         if (parsed.expectedField) setExpectedField(parsed.expectedField);
         if (parsed.compConfig) setCompConfig(parsed.compConfig);
-        if (parsed.customHeaders) setCustomHeaders(parsed.customHeaders);
       } catch (e) { console.error("Restore error", e); }
     }
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ testCases, curlString, expectedField, compConfig, customHeaders }));
-  }, [testCases, curlString, expectedField, compConfig, customHeaders]);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ testCases, curlString, expectedField, compConfig }));
+  }, [testCases, curlString, expectedField, compConfig]);
 
   const getValueByPath = (obj: any, path: string): string => {
     if (obj === undefined || obj === null) return '';
@@ -117,52 +105,8 @@ const App: React.FC = () => {
     setTestCases(cases);
   }, [expectedField]);
 
-  // Header helpers
-  const addHeader = () => {
-    const key = newHeaderKey.trim();
-    const value = newHeaderValue;
-    if (!key) {
-      alert('Header key is required');
-      return;
-    }
-    if (FORBIDDEN_HEADERS.includes(key.toLowerCase())) {
-      alert('This header is forbidden and cannot be set.');
-      return;
-    }
-    setCustomHeaders(prev => [...prev, { key, value }]);
-    setNewHeaderKey('');
-    setNewHeaderValue('');
-  };
+  // Custom header helpers removed (disabled in this version)
 
-  const removeHeader = (index: number) => {
-    const copy = [...customHeaders];
-    copy.splice(index, 1);
-    setCustomHeaders(copy);
-  };
-
-  // Preset helpers (adds or updates known headers quickly)
-  const [presetFeedback, setPresetFeedback] = useState<string | null>(null);
-  const addPreset = (key: string, value: string) => {
-    const lower = key.toLowerCase();
-    if (FORBIDDEN_HEADERS.includes(lower)) {
-      setPresetFeedback('Cannot add a forbidden header');
-      setTimeout(() => setPresetFeedback(null), 2000);
-      return;
-    }
-
-    setCustomHeaders(prev => {
-      const idx = prev.findIndex(h => h.key.toLowerCase() === lower);
-      if (idx !== -1) {
-        const copy = [...prev];
-        copy[idx] = { key, value };
-        return copy;
-      }
-      return [...prev, { key, value }];
-    });
-
-    setPresetFeedback(`${key} preset added`);
-    setTimeout(() => setPresetFeedback(null), 2000);
-  };
 
   const runTests = async () => {
     const configTemplate = parseCurl(curlString);
@@ -175,6 +119,9 @@ const App: React.FC = () => {
     setProgress(0);
     const updated = [...testCases];
 
+    const MAX_ATTEMPTS = 3;
+    const ATTEMPT_DELAY_MS = 2000; // 2 seconds between attempts
+
     for (let i = 0; i < updated.length; i++) {
       const tc = updated[i];
       tc.status = TestStatus.RUNNING;
@@ -182,53 +129,57 @@ const App: React.FC = () => {
 
       try {
         const finalUrl = substituteParams(configTemplate.url, tc.params);
-        let rawText = '';
-        let status = 0;
-
-        // Attach finalUrl for debugging
         tc.finalUrl = finalUrl;
 
-        if (fetchMode === 'bypass') {
-          // for bypass mode the user headers aren't forwarded, but still record what would be sent for debugging
-          const headersDbg: Record<string, string> = {};
-          Object.entries(configTemplate.headers).forEach(([k, v]) => {
-            if (!FORBIDDEN_HEADERS.includes(k.toLowerCase())) headersDbg[k] = substituteParams(v, tc.params);
-          });
-          customHeaders.forEach(h => {
-            if (h.key && !FORBIDDEN_HEADERS.includes(h.key.toLowerCase())) headersDbg[h.key] = substituteParams(h.value, tc.params);
-          });
-          tc.finalHeaders = headersDbg;
+        let rawText = '';
+        let status = 0;
+        let attempt = 0;
+        let success = false;
 
-          const res = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(finalUrl)}`);
-          const data = await res.json();
-          rawText = data.contents;
-          status = res.status;
-        } else {
-          const headers: Record<string, string> = {};
-          // from parsed curl
-          Object.entries(configTemplate.headers).forEach(([k, v]) => {
-            if (!FORBIDDEN_HEADERS.includes(k.toLowerCase())) headers[k] = substituteParams(v, tc.params);
-          });
-          // merge custom headers (overrides parsed ones)
-          customHeaders.forEach(h => {
-            if (h.key && !FORBIDDEN_HEADERS.includes(h.key.toLowerCase())) {
-              headers[h.key] = substituteParams(h.value, tc.params);
+        while (attempt < MAX_ATTEMPTS && !success) {
+          attempt++;
+          try {
+            if (fetchMode === 'bypass') {
+              const headersDbg: Record<string, string> = {};
+              Object.entries(configTemplate.headers).forEach(([k, v]) => {
+                if (!FORBIDDEN_HEADERS.includes(k.toLowerCase())) headersDbg[k] = substituteParams(v, tc.params);
+              });
+              tc.finalHeaders = headersDbg;
+
+              const res = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(finalUrl)}`);
+              const data = await res.json();
+              rawText = data.contents;
+              status = res.status;
+            } else {
+              const headers: Record<string, string> = {};
+              Object.entries(configTemplate.headers).forEach(([k, v]) => {
+                if (!FORBIDDEN_HEADERS.includes(k.toLowerCase())) headers[k] = substituteParams(v, tc.params);
+              });
+
+              tc.finalHeaders = { ...headers };
+
+              console.debug('Request for', tc.id, { url: finalUrl, headers: tc.finalHeaders });
+
+              const res = await fetch(finalUrl, { method: configTemplate.method, headers });
+              rawText = await res.text();
+              status = res.status;
             }
-          });
 
-          // Store final headers used for this test case for debugging
-          tc.finalHeaders = { ...headers };
-
-          console.debug('Request for', tc.id, { url: finalUrl, headers: tc.finalHeaders });
-
-          const res = await fetch(finalUrl, { method: configTemplate.method, headers });
-          rawText = await res.text();
-          status = res.status;
+            // Consider it successful if we got a 200 and non-empty response
+            if (status === 200 && rawText && rawText.trim() !== '') {
+              success = true;
+            } else {
+              if (attempt < MAX_ATTEMPTS) await new Promise(r => setTimeout(r, ATTEMPT_DELAY_MS));
+            }
+          } catch (err) {
+            // If request failed, wait and retry up to MAX_ATTEMPTS
+            if (attempt < MAX_ATTEMPTS) await new Promise(r => setTimeout(r, ATTEMPT_DELAY_MS));
+          }
         }
 
         tc.statusCode = status;
         tc.actualResponse = rawText;
-        
+
         let targetValue = '';
         try {
           const json = JSON.parse(rawText);
@@ -246,6 +197,7 @@ const App: React.FC = () => {
       setProgress(Math.round(((i + 1) / updated.length) * 100));
       setTestCases([...updated]);
     }
+
     setIsRunning(false);
   };
 
@@ -324,29 +276,9 @@ const App: React.FC = () => {
             <div className="mt-4 bg-[#111827] border border-slate-800 p-4 rounded-xl">
               <div className="flex items-start justify-between">
                 <label className="text-[9px] font-black text-indigo-400 uppercase mb-2 block">Custom Headers</label>
-                <div className="flex items-center gap-2">
-                  <button onClick={() => addPreset('x-api-key', 'iVf8NMjXY7Jmb8pjfKG75gumhnjVKvmasH8cEEt2')} className="text-[10px] bg-emerald-600 px-3 py-1 rounded-xl font-black">Add x-api-key</button>
-                </div>
+                <div className="text-[10px] text-slate-500 italic">Disabled in this version</div>
               </div>
-
-              <div className="flex gap-2 items-center">
-                <input value={newHeaderKey} onChange={e => { setNewHeaderKey(e.target.value); setHeaderKeyError(validateHeaderKey(e.target.value)); }} placeholder="Header-Name (e.g. X-Custom-Header)" className="w-1/4 bg-slate-900 border border-slate-700 p-2 rounded-xl text-[11px]" />
-                <input value={newHeaderValue} onChange={e => setNewHeaderValue(e.target.value)} placeholder="Value or {param}" className="flex-1 bg-slate-900 border border-slate-700 p-2 rounded-xl text-[11px]" />
-                <button onClick={addHeader} disabled={!!headerKeyError || !newHeaderKey.trim()} className="bg-indigo-600 px-4 py-2 rounded-xl text-[11px] font-black disabled:opacity-30">Add</button>
-              </div>
-              {headerKeyError && <div className="text-[10px] text-rose-400 mt-2">{headerKeyError}</div>} 
-
-              <div className="mt-3 space-y-2">
-                {customHeaders.map((h, idx) => (
-                  <div key={idx} className="flex items-center gap-2">
-                    <div className="text-[11px] font-bold">{h.key}:</div>
-                    <div className="text-[11px] text-slate-400 truncate">{h.value}</div>
-                    <button onClick={() => removeHeader(idx)} className="ml-auto text-rose-400 text-[10px] font-black">Remove</button>
-                  </div>
-                ))}
-                <p className="text-[9px] text-slate-500 italic">Note: Forbidden headers (user-agent, origin, host, cookie, etc.) are not allowed.</p>
-                {presetFeedback && <div className="text-[10px] text-emerald-400 mt-2">{presetFeedback}</div>}
-              </div>
+              <p className="text-[9px] text-slate-500 italic mt-3">Custom header editing and presets have been disabled as requested. The runner will only use headers parsed from the uploaded cURL.</p>
             </div> 
           </div>
 
