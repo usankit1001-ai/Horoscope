@@ -12,6 +12,39 @@ const FORBIDDEN_HEADERS = [
 
 const STORAGE_KEY = 'horoscope_qa_v3';
 
+// Error boundary to catch runtime render errors and show a helpful message instead of a white screen
+class ErrorBoundary extends React.Component<any, { hasError: boolean; error: any }> {
+  constructor(props: any) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: any, info: any) {
+    console.error('ErrorBoundary caught an error', error, info);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen flex items-center justify-center p-8">
+          <div className="max-w-3xl w-full bg-rose-900/90 text-white p-8 rounded-2xl shadow-xl">
+            <h2 className="text-lg font-bold mb-2">An error occurred</h2>
+            <p className="mb-4">The app encountered an unexpected error while rendering. Please check the console for details.</p>
+            <pre className="text-xs whitespace-pre-wrap bg-black/20 p-3 rounded">{String(this.state.error)}</pre>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+
 const App: React.FC = () => {
   const [curlString, setCurlString] = useState<string>('');
   const [inputRows, setInputRows] = useState<Record<string, string>[]>([]);
@@ -30,8 +63,70 @@ const App: React.FC = () => {
     strategy: MatchStrategy.CONTAINS
   });
 
-  // Custom headers disabled (removed per request)
+  // Simple custom headers support (key/value list, persisted)
+  const [customHeaders, setCustomHeaders] = useState<{key: string, value: string}[]>([]);
+  const [newHeaderKey, setNewHeaderKey] = useState('');
+  const [newHeaderValue, setNewHeaderValue] = useState('');
+  const [headerKeyError, setHeaderKeyError] = useState<string | null>(null);
+  const [presetFeedback, setPresetFeedback] = useState<string | null>(null);
 
+  const HEADER_NAME_RE = /^[A-Za-z0-9-]+$/;
+  const validateHeaderKey = (k: string) => {
+    if (!k || !k.trim()) return 'Header key is required';
+    if (!HEADER_NAME_RE.test(k)) return 'Invalid header key (letters, numbers and hyphen only)';
+    if (FORBIDDEN_HEADERS.includes(k.toLowerCase())) return 'This header is forbidden in browsers';
+    return null;
+  };
+
+  const addHeader = () => {
+    const key = newHeaderKey.trim();
+    const value = newHeaderValue;
+    const err = validateHeaderKey(key);
+    if (err) {
+      setHeaderKeyError(err);
+      return;
+    }
+    setCustomHeaders(prev => {
+      const idx = prev.findIndex(h => h.key.toLowerCase() === key.toLowerCase());
+      if (idx !== -1) {
+        const copy = [...prev];
+        copy[idx] = { key, value };
+        return copy;
+      }
+      return [...prev, { key, value }];
+    });
+    setNewHeaderKey('');
+    setNewHeaderValue('');
+    setHeaderKeyError(null);
+  };
+
+  const removeHeader = (index: number) => {
+    const copy = [...customHeaders];
+    copy.splice(index, 1);
+    setCustomHeaders(copy);
+  };
+
+  const addPreset = (key: string, value: string) => {
+    const lower = key.toLowerCase();
+    if (FORBIDDEN_HEADERS.includes(lower)) {
+      setPresetFeedback('Cannot add a forbidden header');
+      setTimeout(() => setPresetFeedback(null), 2000);
+      return;
+    }
+
+    setCustomHeaders(prev => {
+      const idx = prev.findIndex(h => h.key.toLowerCase() === lower);
+      if (idx !== -1) {
+        const copy = [...prev];
+        copy[idx] = { key, value };
+        return copy;
+      }
+      return [...prev, { key, value }];
+    });
+
+    setPresetFeedback(`${key} preset added`);
+    setTimeout(() => setPresetFeedback(null), 2000);
+  };
 
   // Persist settings and results
   useEffect(() => {
@@ -43,13 +138,14 @@ const App: React.FC = () => {
         if (parsed.curlString) setCurlString(parsed.curlString);
         if (parsed.expectedField) setExpectedField(parsed.expectedField);
         if (parsed.compConfig) setCompConfig(parsed.compConfig);
+        if (parsed.customHeaders) setCustomHeaders(parsed.customHeaders);
       } catch (e) { console.error("Restore error", e); }
     }
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ testCases, curlString, expectedField, compConfig }));
-  }, [testCases, curlString, expectedField, compConfig]);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ testCases, curlString, expectedField, compConfig, customHeaders }));
+  }, [testCases, curlString, expectedField, compConfig, customHeaders]);
 
   const getValueByPath = (obj: any, path: string): string => {
     if (obj === undefined || obj === null) return '';
@@ -105,9 +201,6 @@ const App: React.FC = () => {
     setTestCases(cases);
   }, [expectedField]);
 
-  // Custom header helpers removed (disabled in this version)
-
-
   const runTests = async () => {
     const configTemplate = parseCurl(curlString);
     if (!configTemplate.url || testCases.length === 0) {
@@ -121,6 +214,12 @@ const App: React.FC = () => {
 
     const MAX_ATTEMPTS = 3;
     const ATTEMPT_DELAY_MS = 2000; // 2 seconds between attempts
+
+    // If custom headers present and the mode is bypass, switch to direct mode because proxy won't forward headers
+    if (customHeaders.length > 0 && fetchMode === 'bypass') {
+      setPresetFeedback('Custom headers detected: switching to Direct mode');
+      setFetchMode('direct');
+    }
 
     for (let i = 0; i < updated.length; i++) {
       const tc = updated[i];
@@ -144,6 +243,10 @@ const App: React.FC = () => {
               Object.entries(configTemplate.headers).forEach(([k, v]) => {
                 if (!FORBIDDEN_HEADERS.includes(k.toLowerCase())) headersDbg[k] = substituteParams(v, tc.params);
               });
+              // include custom headers for debugging visibility only
+              customHeaders.forEach(h => {
+                if (h.key && !FORBIDDEN_HEADERS.includes(h.key.toLowerCase())) headersDbg[h.key] = substituteParams(h.value, tc.params);
+              });
               tc.finalHeaders = headersDbg;
 
               const res = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(finalUrl)}`);
@@ -156,6 +259,14 @@ const App: React.FC = () => {
                 if (!FORBIDDEN_HEADERS.includes(k.toLowerCase())) headers[k] = substituteParams(v, tc.params);
               });
 
+              // merge simple custom headers (overrides parsed ones)
+              customHeaders.forEach(h => {
+                if (h.key && !FORBIDDEN_HEADERS.includes(h.key.toLowerCase())) {
+                  headers[h.key] = substituteParams(h.value, tc.params);
+                }
+              });
+
+              // Store final headers used for this test case for debugging
               tc.finalHeaders = { ...headers };
 
               console.debug('Request for', tc.id, { url: finalUrl, headers: tc.finalHeaders });
@@ -228,7 +339,8 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-[#0F172A] text-slate-100 flex flex-col font-sans">
+    <ErrorBoundary>
+      <div className="min-h-screen bg-[#0F172A] text-slate-100 flex flex-col font-sans">
       <header className="border-b border-slate-800 p-6 flex flex-col md:flex-row justify-between items-center bg-[#1E293B] shadow-2xl gap-6 sticky top-0 z-[60]">
         <div className="flex items-center gap-4">
           <div className="bg-indigo-600 p-3 rounded-2xl shadow-indigo-500/20 shadow-xl">
@@ -276,9 +388,29 @@ const App: React.FC = () => {
             <div className="mt-4 bg-[#111827] border border-slate-800 p-4 rounded-xl">
               <div className="flex items-start justify-between">
                 <label className="text-[9px] font-black text-indigo-400 uppercase mb-2 block">Custom Headers</label>
-                <div className="text-[10px] text-slate-500 italic">Disabled in this version</div>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => addPreset('x-api-key', 'iVf8NMjXY7Jmb8pjfKG75gumhnjVKvmasH8cEEt2')} className="text-[10px] bg-emerald-600 px-3 py-1 rounded-xl font-black">Add x-api-key</button>
+                </div>
               </div>
-              <p className="text-[9px] text-slate-500 italic mt-3">Custom header editing and presets have been disabled as requested. The runner will only use headers parsed from the uploaded cURL.</p>
+
+              <div className="flex gap-2 items-center">
+                <input value={newHeaderKey} onChange={e => { setNewHeaderKey(e.target.value); setHeaderKeyError(validateHeaderKey(e.target.value)); }} placeholder="Header-Name (e.g. X-Custom-Header)" className="w-1/4 bg-slate-900 border border-slate-700 p-2 rounded-xl text-[11px]" />
+                <input value={newHeaderValue} onChange={e => setNewHeaderValue(e.target.value)} placeholder="Value or {param}" className="flex-1 bg-slate-900 border border-slate-700 p-2 rounded-xl text-[11px]" />
+                <button onClick={addHeader} disabled={!!headerKeyError || !newHeaderKey.trim()} className="bg-indigo-600 px-4 py-2 rounded-xl text-[11px] font-black disabled:opacity-30">Add</button>
+              </div>
+              {headerKeyError && <div className="text-[10px] text-rose-400 mt-2">{headerKeyError}</div>} 
+
+              <div className="mt-3 space-y-2">
+                {customHeaders.map((h, idx) => (
+                  <div key={idx} className="flex items-center gap-2">
+                    <div className="text-[11px] font-bold">{h.key}:</div>
+                    <div className="text-[11px] text-slate-400 truncate">{h.value}</div>
+                    <button onClick={() => removeHeader(idx)} className="ml-auto text-rose-400 text-[10px] font-black">Remove</button>
+                  </div>
+                ))}
+                <p className="text-[9px] text-slate-500 italic">Note: Forbidden headers (user-agent, origin, host, cookie, etc.) are not allowed.</p>
+                {presetFeedback && <div className="text-[10px] text-emerald-400 mt-2">{presetFeedback}</div>}
+              </div>
             </div> 
           </div>
 
@@ -478,6 +610,7 @@ const App: React.FC = () => {
         .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
       `}</style>
     </div>
+    </ErrorBoundary>
   );
 };
 
