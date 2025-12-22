@@ -70,6 +70,12 @@ const App: React.FC = () => {
   const [headerKeyError, setHeaderKeyError] = useState<string | null>(null);
   const [presetFeedback, setPresetFeedback] = useState<string | null>(null);
 
+  // Diagnostic / helper states
+  const [diagStatus, setDiagStatus] = useState<string | null>(null);
+  const [diagLoading, setDiagLoading] = useState(false);
+  const [serverHeaderError, setServerHeaderError] = useState(false);
+  const [headerErrorMessage, setHeaderErrorMessage] = useState<string | null>(null);
+
   const HEADER_NAME_RE = /^[A-Za-z0-9-]+$/;
   const validateHeaderKey = (k: string) => {
     if (!k || !k.trim()) return 'Header key is required';
@@ -127,6 +133,53 @@ const App: React.FC = () => {
     setPresetFeedback(`${key} preset added`);
     setTimeout(() => setPresetFeedback(null), 2000);
   };
+
+  // Run a quick diagnostic request to check whether the server receives the custom headers
+  const runHeaderDiagnostic = async () => {
+    setDiagLoading(true);
+    setDiagStatus(null);
+    setServerHeaderError(false);
+    setHeaderErrorMessage(null);
+
+    // If user is on proxy mode, warn that headers may not be forwarded
+    if (fetchMode === 'bypass') {
+      setDiagStatus('Warning: Proxy mode may not forward custom headers. Switch to Direct to test headers.');
+      setDiagLoading(false);
+      return;
+    }
+
+    try {
+      const testUrl = 'https://stagingapi.astroapi.com/api/v1/prediction/monthly?language=eng&month=1&year=2026&report=LOVE&zodiac=ARIES';
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      customHeaders.forEach(h => { if (h.key && !FORBIDDEN_HEADERS.includes(h.key.toLowerCase())) headers[h.key] = h.value; });
+
+      const res = await fetch(testUrl, { method: 'GET', headers });
+      const text = await res.text();
+
+      if (res.status === 200 && text && !String(text).toLowerCase().includes('please set custom header')) {
+        setDiagStatus('Header diagnostic: Server accepted headers (OK).');
+        setServerHeaderError(false);
+      } else if (String(text).toLowerCase().includes('please set custom header')) {
+        setDiagStatus('Header diagnostic: Server responded: "Please set custom header" — missing/incorrect header.');
+        setServerHeaderError(true);
+        setHeaderErrorMessage(text);
+      } else {
+        setDiagStatus(`Header diagnostic: unexpected response (status=${res.status}).`);
+      }
+    } catch (e: any) {
+      setDiagStatus(`Header diagnostic failed: ${e.message}`);
+    }
+
+    setDiagLoading(false);
+    // auto-dismiss status after a short time
+    setTimeout(() => setDiagStatus(null), 7000);
+  };
+
+  const autoAddApiKeyPresetIfMissing = (value: string) => {
+    // Add or update x-api-key preset and show feedback
+    addPreset('x-api-key', value);
+  };
+
 
   // Persist settings and results
   useEffect(() => {
@@ -278,7 +331,16 @@ const App: React.FC = () => {
 
             // Consider it successful if we got a 200 and non-empty response
             if (status === 200 && rawText && rawText.trim() !== '') {
-              success = true;
+              // Detect server message about missing headers
+              if (String(rawText).toLowerCase().includes('please set custom header')) {
+                setServerHeaderError(true);
+                setHeaderErrorMessage(rawText);
+                setPresetFeedback('Server indicates a custom header is required. Use Test Headers to diagnose or add x-api-key preset.');
+                // don't treat this as success — allow retries in case header is transient
+                if (attempt < MAX_ATTEMPTS) await new Promise(r => setTimeout(r, ATTEMPT_DELAY_MS));
+              } else {
+                success = true;
+              }
             } else {
               if (attempt < MAX_ATTEMPTS) await new Promise(r => setTimeout(r, ATTEMPT_DELAY_MS));
             }
@@ -360,6 +422,13 @@ const App: React.FC = () => {
             <button onClick={() => setFetchMode('direct')} className={`px-5 py-2 rounded-xl text-[10px] font-black uppercase transition-all ${fetchMode === 'direct' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}>Direct</button>
             <button onClick={() => setFetchMode('bypass')} className={`px-5 py-2 rounded-xl text-[10px] font-black uppercase transition-all ${fetchMode === 'bypass' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}>Proxy</button>
           </div>
+
+          {/* Show a warning if the user is in Proxy mode but has custom headers configured */}
+          {fetchMode === 'bypass' && customHeaders.length > 0 && (
+            <div className="w-full bg-amber-600/10 border-l-4 border-amber-400 text-amber-300 text-[11px] px-4 py-2 rounded-lg mt-2">
+              <strong className="font-bold">Warning:</strong> Proxy mode may not forward custom headers. Switch to <span className="font-black">Direct</span> to include them.
+            </div>
+          )}
           
           <div className="flex gap-2">
             <button onClick={() => { setTestCases([]); localStorage.removeItem(STORAGE_KEY); }} className="bg-slate-800 hover:bg-rose-600/20 hover:text-rose-400 border border-slate-700 p-3 rounded-2xl transition-all" title="Reset All">
@@ -390,6 +459,7 @@ const App: React.FC = () => {
                 <label className="text-[9px] font-black text-indigo-400 uppercase mb-2 block">Custom Headers</label>
                 <div className="flex items-center gap-2">
                   <button onClick={() => addPreset('x-api-key', 'iVf8NMjXY7Jmb8pjfKG75gumhnjVKvmasH8cEEt2')} className="text-[10px] bg-emerald-600 px-3 py-1 rounded-xl font-black">Add x-api-key</button>
+                  <button onClick={runHeaderDiagnostic} disabled={diagLoading} className="text-[10px] bg-sky-600 px-3 py-1 rounded-xl font-black">{diagLoading ? 'Testing...' : 'Test Headers'}</button>
                 </div>
               </div>
 
@@ -408,8 +478,26 @@ const App: React.FC = () => {
                     <button onClick={() => removeHeader(idx)} className="ml-auto text-rose-400 text-[10px] font-black">Remove</button>
                   </div>
                 ))}
-                <p className="text-[9px] text-slate-500 italic">Note: Forbidden headers (user-agent, origin, host, cookie, etc.) are not allowed.</p>
+
+                <div className="flex items-center gap-2">
+                  <p className="text-[9px] text-slate-500 italic">Note: Forbidden headers (user-agent, origin, host, cookie, etc.) are not allowed.</p>
+                </div>
+
                 {presetFeedback && <div className="text-[10px] text-emerald-400 mt-2">{presetFeedback}</div>}
+
+                {diagStatus && (
+                  <div className={`mt-2 p-3 rounded ${serverHeaderError ? 'bg-rose-700/80 text-white' : 'bg-emerald-700/10 text-emerald-300'}`}>
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="text-[11px] font-bold">{diagStatus}</div>
+                      {serverHeaderError && (
+                        <div className="flex items-center gap-2">
+                          <button onClick={() => autoAddApiKeyPresetIfMissing('iVf8NMjXY7Jmb8pjfKG75gumhnjVKvmasH8cEEt2')} className="bg-emerald-600 px-3 py-1 rounded-xl text-[10px] font-black">Add x-api-key</button>
+                        </div>
+                      )}
+                    </div>
+                    {headerErrorMessage && <pre className="mt-2 text-xs whitespace-pre-wrap bg-black/10 p-2 rounded">{String(headerErrorMessage)}</pre>}
+                  </div>
+                )}
               </div>
             </div> 
           </div>
